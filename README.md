@@ -8,3 +8,12 @@ Rekt doesn't aim to be fastest on the west, but it tries to be fast enough while
 
 Currently rekt works as static web server, responding only to `GET` method
 
+# TODOs
+* `POST` method recognition
+* `POST` forms parse
+* `Content-Type` header recognition
+* Populating HTTP response codes with most used codes like 301,302,400,500
+* JSON parsing
+* simpe HTTP templating 
+* (maybe) adjust stack size for child forked processes using `setrlimit()`
+* (maybe) switch `fork()` to `select()` or `poll()` for multiplexing. If complexity over increased and performance is not that different, stick to `fork()`

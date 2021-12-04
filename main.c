@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/syslimits.h>
 #include <netinet/in.h>
 
 #ifdef DEBUG
@@ -25,8 +26,35 @@
 #define PORT 8080
 #define BFSZ 1400
 
+static char www_dir[PATH_MAX] = "./";
+
+#define SET_FLAGS(ARGC, ARGV)                                   \
+    {                                                           \
+        int flag = 0;                                           \
+        for (int i = 1; i < ARGC; ++i)                          \
+        {                                                       \
+            switch (flag)                                       \
+            {                                                   \
+            case 0:                                             \
+                if (ARGV[i][0] == '-')                          \
+                {                                               \
+                    flag = ARGV[i][1];                          \
+                }                                               \
+                break;                                          \
+            case 'd':                                           \
+                strncpy(www_dir, ARGV[i], strlen(ARGV[i]) + 1); \
+                flag = 0;                                       \
+                break;                                          \
+            default:                                            \
+                flag = 0;                                       \
+            }                                                   \
+        }                                                       \
+    }
+
 int main(int argc, char const **argv)
 {
+    SET_FLAGS(argc, argv);
+
     int server_fd = 0, conn_fd = 0, valread = 0;
     struct sockaddr_in address = {
         .sin_family = AF_INET,
@@ -92,6 +120,7 @@ int main(int argc, char const **argv)
                     if (!strcmp(routecp, "./"))
                         strncpy(routecp, "./index.html", 13);
 
+                    chdir(www_dir);
                     if (access(routecp, F_OK) == 0)
                     {
                         VERBOSE("%s\n", routecp);
@@ -105,7 +134,7 @@ int main(int argc, char const **argv)
                             static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
                             fprintf(f_send, "%s", httpStatus200);
 
-                            fileBuf = malloc(fileSize);
+                            (fileSize > BFSZ) ? fileBuf = malloc(fileSize) : (fileBuf = buf);
                             int n = fread(fileBuf, 1, fileSize, fp);
                             fwrite(fileBuf, 1, n, f_send);
                             fflush(f_send);
@@ -113,8 +142,8 @@ int main(int argc, char const **argv)
 
                             VERBOSE("Size :\t%zu KiB\n", fileSize / (1 << 10));
                             VERBOSE("Handle time = %f seconds\n\n",
-                                   (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
-                                       (double)(tv2.tv_sec - tv1.tv_sec));
+                                    (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
+                                        (double)(tv2.tv_sec - tv1.tv_sec));
                             fclose(fp);
                             free(fileBuf);
                             exit(EXIT_SUCCESS);

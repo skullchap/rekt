@@ -10,6 +10,10 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 
+#ifdef EXPERIMENTAL
+#include <sys/resource.h>
+#endif
+
 #ifdef DEBUG
 #define VERBOSE(...) printf(__VA_ARGS__)
 #else
@@ -29,6 +33,7 @@
 #define BFSZ 1400
 
 static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
+static char httpStatus404[] = "HTTP/1.1 404 Not Found\r\n\r\n";
 
 static char www_dir[PATH_MAX] = "./";
 
@@ -41,9 +46,7 @@ static char www_dir[PATH_MAX] = "./";
             {                                                       \
             case 0:                                                 \
                 if (ARGV[i][0] == '-')                              \
-                {                                                   \
                     flag = ARGV[i][1];                              \
-                }                                                   \
                 break;                                              \
             case 'd':                                               \
                 strncpy(www_dir + 2, ARGV[i], strlen(ARGV[i]) + 1); \
@@ -62,7 +65,7 @@ int main(int argc, char const **argv)
 {
     SET_FLAGS(argc, argv);
     if (!chdir(www_dir))
-        VERBOSE("\nworking directory set to %s\n\n", www_dir);
+        VERBOSE("\nwork dir set to %s\n\n", www_dir);
 
     int server_fd = 0, conn_fd = 0, valread = 0;
     struct sockaddr_in address = {
@@ -83,7 +86,6 @@ int main(int argc, char const **argv)
 
     struct timeval tv1 = {0}, tv2 = {0};
     struct stat stats = {0};
-
     DIR *d = NULL;
     struct dirent *dir = NULL;
 
@@ -93,13 +95,24 @@ int main(int argc, char const **argv)
         CHKRES(conn_fd, "accept error");
 
         gettimeofday(&tv1, NULL);
-        FILE *f_recv = fdopen(dup(conn_fd), "rb");
+        FILE *f_recv = fdopen(conn_fd, "rb");
         FILE *f_send = fdopen(dup(conn_fd), "wb");
+
+        /*
+         * ONLY WORKS WITH EXPERIMENTAL FLAG
+         * SETS STACK SIZE OF FORKED CHILD TO 16 KiB.
+         * IN CASE OF FAULTS OR BROKEN PAGES, REMOVE IT!
+        */
+        #ifdef EXPERIMENTAL
+        CHKRES(setrlimit(RLIMIT_STACK,
+                         &(struct rlimit){.rlim_max = 16384,
+                                          .rlim_cur = 16384}),
+               "setrlimit error");
+        #endif
 
         if (!fork()) // child
         {
             char buf[BFSZ] = {0};
-            void *fileBuf = NULL;
             {
                 if (fgets(buf, BFSZ, f_recv) == NULL)
                     exit(EXIT_FAILURE);
@@ -121,7 +134,8 @@ int main(int argc, char const **argv)
 
                     route[strcspn(route, " ")] = '\0';
 
-                    if (strstr(route, "../") != NULL)
+                    if (strstr(route, "../") != NULL ||
+                        strstr(route, "/..") != NULL)
                         exit(EXIT_FAILURE); // back path-traversal prevention
                     VERBOSE("Route :\t%s\n", route);
 
@@ -153,10 +167,13 @@ int main(int argc, char const **argv)
                                                     "href=\"/%s/%s\">%s</a>\n",
                                             routecp, dir->d_name, dir->d_name);
                                 }
-                                fflush(f_send);
-                                closedir(d);
-                                d = NULL;
-                                dir = NULL;
+                                /* for 'CLEANER' EXIT */
+                                #ifdef EXPERIMENTAL
+                                // fflush(f_send);
+                                // closedir(d);
+                                // d = NULL;
+                                // dir = NULL;
+                                #endif
                                 exit(EXIT_SUCCESS);
                             }
                         }
@@ -171,6 +188,7 @@ int main(int argc, char const **argv)
 
                             fprintf(f_send, "%s", httpStatus200);
 
+                            void *fileBuf = NULL;
                             // (fileSize > BFSZ) ? fileBuf = malloc(fileSize) : (fileBuf = buf);
                             fileBuf = malloc(fileSize);
                             int n = fread(fileBuf, 1, fileSize, fp);
@@ -182,16 +200,21 @@ int main(int argc, char const **argv)
                             VERBOSE("Handle time = %f seconds\n\n",
                                     (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
                                         (double)(tv2.tv_sec - tv1.tv_sec));
-                            fclose(fp);
-                            free(fileBuf);
+                            
+                            /* for 'CLEANER' EXIT */
+                            #ifdef EXPERIMENTAL            
+                            // fclose(fp);
+                            // free(fileBuf);
+                            #endif
                             exit(EXIT_SUCCESS);
                         }
                     }
                     else
                     {
                         VERBOSE("%s does not exist\n\n", routecp);
-                        fprintf(f_send, "HTTP/1.1 404\r\n\r\n"
+                        fprintf(f_send, "%s"
                                         "<h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
+                                httpStatus404,
                                 routecp);
                         exit(EXIT_SUCCESS);
                     }

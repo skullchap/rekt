@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <sys/syslimits.h>
 #include <sys/stat.h>
+#include <sys/poll.h>
 #include <netinet/in.h>
 
 #ifdef EXPERIMENTAL
@@ -89,6 +90,8 @@ int main(int argc, char const **argv)
     DIR *d = NULL;
     struct dirent *dir = NULL;
 
+    struct pollfd fds;
+
     while (1)
     {
         conn_fd = accept(server_fd, NULL, NULL);
@@ -97,6 +100,9 @@ int main(int argc, char const **argv)
         gettimeofday(&tv1, NULL);
         FILE *f_recv = fdopen(conn_fd, "rb");
         FILE *f_send = fdopen(dup(conn_fd), "wb");
+
+        fds.fd = conn_fd;
+        fds.events = POLLIN;
 
         /*
          * ONLY WORKS WITH EXPERIMENTAL FLAG
@@ -112,15 +118,32 @@ int main(int argc, char const **argv)
 
         if (!fork()) // child
         {
-            char buf[BFSZ] = {0};
+            char buf[BFSZ] = {0}; 
             {
-                if (fgets(buf, BFSZ, f_recv) == NULL)
+                if (!poll(&fds, 1, 10 * 1000))
                     exit(EXIT_FAILURE);
+
+                valread = read(conn_fd, buf, BFSZ);
+                CHKRES(valread, "read error");
+
+                // if (fgets(buf + offset, BFSZ, f_recv) == NULL)
+                //     exit(EXIT_FAILURE);
+                // offset += strlen(buf + offset);
 
                 if (buf[0] == 'G' &&
                     buf[1] == 'E' &&
                     buf[2] == 'T')
                 {
+                    // while (fgets(buf + offset, BFSZ, f_recv) != NULL)
+                    // {
+                    //     if ((buf + offset)[0] == '\n' || (buf + offset)[1] == '\n')
+                    //         break;
+                    //     offset += strlen(buf + offset);
+                    //     if (offset > BFSZ)
+                    //         exit(EXIT_FAILURE);
+                    // }
+                    printf("%s\n", buf);
+
                     VERBOSE("Method:\tGET\n");
                     char *route = NULL; /* part after GET */
                     if (buf[3] == ' ')
@@ -169,10 +192,10 @@ int main(int argc, char const **argv)
                                 }
                                 /* for 'CLEANER' EXIT */
                                 #ifdef EXPERIMENTAL
-                                // fflush(f_send);
-                                // closedir(d);
-                                // d = NULL;
-                                // dir = NULL;
+                                fflush(f_send);
+                                closedir(d);
+                                d = NULL;
+                                dir = NULL;
                                 #endif
                                 exit(EXIT_SUCCESS);
                             }
@@ -203,8 +226,8 @@ int main(int argc, char const **argv)
                             
                             /* for 'CLEANER' EXIT */
                             #ifdef EXPERIMENTAL            
-                            // fclose(fp);
-                            // free(fileBuf);
+                            fclose(fp);
+                            free(fileBuf);
                             #endif
                             exit(EXIT_SUCCESS);
                         }

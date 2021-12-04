@@ -16,5 +16,5 @@ Currently rekt works as static web server, responding only to `GET` method
 * Populating HTTP response codes with most used codes like 301,302,400,500
 * JSON parsing
 * simple HTTP templating 
-* <strike>(maybe) adjust stack size for child forked processes using</strike>
+* <strike>(maybe) adjust stack size for child forked processes.</strike>
 * (maybe) switch `fork()` to `select()` or `poll()` for multiplexing. If complexity over increased and performance is not that different, stick to `fork()`

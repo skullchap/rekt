@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/syslimits.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 
 #ifdef DEBUG
@@ -26,34 +28,41 @@
 #define PORT 8080
 #define BFSZ 1400
 
+static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
+
 static char www_dir[PATH_MAX] = "./";
 
-#define SET_FLAGS(ARGC, ARGV)                                   \
-    {                                                           \
-        int flag = 0;                                           \
-        for (int i = 1; i < ARGC; ++i)                          \
-        {                                                       \
-            switch (flag)                                       \
-            {                                                   \
-            case 0:                                             \
-                if (ARGV[i][0] == '-')                          \
-                {                                               \
-                    flag = ARGV[i][1];                          \
-                }                                               \
-                break;                                          \
-            case 'd':                                           \
-                strncpy(www_dir, ARGV[i], strlen(ARGV[i]) + 1); \
-                flag = 0;                                       \
-                break;                                          \
-            default:                                            \
-                flag = 0;                                       \
-            }                                                   \
-        }                                                       \
+#define SET_FLAGS(ARGC, ARGV)                                       \
+    {                                                               \
+        int flag = 0;                                               \
+        for (int i = 1; i < ARGC; ++i)                              \
+        {                                                           \
+            switch (flag)                                           \
+            {                                                       \
+            case 0:                                                 \
+                if (ARGV[i][0] == '-')                              \
+                {                                                   \
+                    flag = ARGV[i][1];                              \
+                }                                                   \
+                break;                                              \
+            case 'd':                                               \
+                strncpy(www_dir + 2, ARGV[i], strlen(ARGV[i]) + 1); \
+                if (strstr(www_dir, "../") != NULL ||               \
+                    strstr(www_dir, "/..") != NULL)                 \
+                    www_dir[2] = '\0';                              \
+                flag = 0;                                           \
+                break;                                              \
+            default:                                                \
+                flag = 0;                                           \
+            }                                                       \
+        }                                                           \
     }
 
 int main(int argc, char const **argv)
 {
     SET_FLAGS(argc, argv);
+    if (!chdir(www_dir))
+        VERBOSE("\nworking directory set to %s\n\n", www_dir);
 
     int server_fd = 0, conn_fd = 0, valread = 0;
     struct sockaddr_in address = {
@@ -72,7 +81,11 @@ int main(int argc, char const **argv)
 
     signal(SIGCHLD, SIG_IGN);
 
-    struct timeval tv1, tv2;
+    struct timeval tv1 = {0}, tv2 = {0};
+    struct stat stats = {0};
+
+    DIR *d = NULL;
+    struct dirent *dir = NULL;
 
     while (1)
     {
@@ -120,9 +133,34 @@ int main(int argc, char const **argv)
                     if (!strcmp(routecp, "./"))
                         strncpy(routecp, "./index.html", 13);
 
-                    chdir(www_dir);
                     if (access(routecp, F_OK) == 0)
                     {
+                        stat(routecp, &stats);
+                        if (S_ISDIR(stats.st_mode))
+                        {
+                            d = opendir(routecp);
+                            if (d)
+                            {
+                                fprintf(f_send, "%s", httpStatus200);
+                                fprintf(f_send, "<h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
+
+                                while ((dir = readdir(d)) != NULL)
+                                {
+                                    if (dir->d_name[0] == '.' &&
+                                        (dir->d_name[1] == '.' || dir->d_name[1] == '\0'))
+                                        continue;
+                                    fprintf(f_send, "<a style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\""
+                                                    "href=\"/%s/%s\">%s</a>\n",
+                                            routecp, dir->d_name, dir->d_name);
+                                }
+                                fflush(f_send);
+                                closedir(d);
+                                d = NULL;
+                                dir = NULL;
+                                exit(EXIT_SUCCESS);
+                            }
+                        }
+
                         VERBOSE("%s\n", routecp);
                         FILE *fp = fopen(routecp, "rb");
                         if (fp != NULL)
@@ -131,10 +169,10 @@ int main(int argc, char const **argv)
                             size_t fileSize = ftell(fp);
                             rewind(fp);
 
-                            static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
                             fprintf(f_send, "%s", httpStatus200);
 
-                            (fileSize > BFSZ) ? fileBuf = malloc(fileSize) : (fileBuf = buf);
+                            // (fileSize > BFSZ) ? fileBuf = malloc(fileSize) : (fileBuf = buf);
+                            fileBuf = malloc(fileSize);
                             int n = fread(fileBuf, 1, fileSize, fp);
                             fwrite(fileBuf, 1, n, f_send);
                             fflush(f_send);

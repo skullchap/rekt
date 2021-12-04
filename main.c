@@ -126,22 +126,10 @@ int main(int argc, char const **argv)
                 valread = read(conn_fd, buf, BFSZ);
                 CHKRES(valread, "read error");
 
-                // if (fgets(buf + offset, BFSZ, f_recv) == NULL)
-                //     exit(EXIT_FAILURE);
-                // offset += strlen(buf + offset);
-
                 if (buf[0] == 'G' &&
                     buf[1] == 'E' &&
                     buf[2] == 'T')
                 {
-                    // while (fgets(buf + offset, BFSZ, f_recv) != NULL)
-                    // {
-                    //     if ((buf + offset)[0] == '\n' || (buf + offset)[1] == '\n')
-                    //         break;
-                    //     offset += strlen(buf + offset);
-                    //     if (offset > BFSZ)
-                    //         exit(EXIT_FAILURE);
-                    // }
                     printf("%s\n", buf);
 
                     VERBOSE("Method:\tGET\n");

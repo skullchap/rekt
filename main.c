@@ -4,9 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/syslimits.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 

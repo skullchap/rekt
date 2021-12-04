@@ -9,6 +9,7 @@ Rekt doesn't aim to be fastest on the west, but it tries to be fast enough while
 Currently rekt works as static web server, responding only to `GET` method
 
 # TODOs
+* <strike>add simple interface for directories</strike>
 * simple http interface that shows directory files, and allows access them
 * `POST` method recognition
 * `POST` forms parse

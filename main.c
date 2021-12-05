@@ -176,7 +176,7 @@ int main(int argc, char const **argv)
                             if (d)
                             {
                                 fprintf(f_send, "%s", httpStatus200);
-                                fprintf(f_send, "<h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
+                                fprintf(f_send, "<!DOCTYPE html><h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
 
                                 while ((dir = readdir(d)) != NULL)
                                 {
@@ -231,7 +231,7 @@ int main(int argc, char const **argv)
                         {
                             perror("fopen");
                             fprintf(f_send, "%s"
-                                            "<h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
+                                            "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
                                     httpStatus403);
                             exit(EXIT_FAILURE);
                         }
@@ -240,7 +240,7 @@ int main(int argc, char const **argv)
                     {
                         VERBOSE("%s does not exist\n\n", routecp);
                         fprintf(f_send, "%s"
-                                        "<h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
+                                        "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
                                 httpStatus404,
                                 routecp);
                         exit(EXIT_SUCCESS);

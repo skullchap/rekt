@@ -34,33 +34,33 @@
 #define BFSZ 1400
 
 static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
+static char httpStatus403[] = "HTTP/1.1 403 Forbidden\r\n\r\n";
 static char httpStatus404[] = "HTTP/1.1 404 Not Found\r\n\r\n";
 
 static char www_dir[PATH_MAX] = "./";
 
-#define SET_FLAGS(ARGC, ARGV)                                       \
-    {                                                               \
-        int flag = 0;                                               \
-        for (int i = 1; i < ARGC; ++i)                              \
-        {                                                           \
-            switch (flag)                                           \
-            {                                                       \
-            case 0:                                                 \
-                if (ARGV[i][0] == '-')                              \
-                    flag = ARGV[i][1];                              \
-                break;                                              \
-            case 'd':                                               \
-                strncpy(www_dir + 2, ARGV[i], strlen(ARGV[i]) + 1); \
-                if (strstr(www_dir, "../") != NULL ||               \
-                    strstr(www_dir, "/..") != NULL)                 \
-                    www_dir[2] = '\0';                              \
-                flag = 0;                                           \
-                break;                                              \
-            default:                                                \
-                flag = 0;                                           \
-            }                                                       \
-        }                                                           \
+#define SET_FLAGS(ARGC, ARGV)                                   \
+    {                                                           \
+        int flag = 0;                                           \
+        for (int i = 1; i < ARGC; ++i)                          \
+        {                                                       \
+            switch (flag)                                       \
+            {                                                   \
+            case 0:                                             \
+                if (ARGV[i][0] == '-')                          \
+                    flag = ARGV[i][1];                          \
+                break;                                          \
+            case 'd':                                           \
+                strncpy(www_dir, ARGV[i], strlen(ARGV[i]) + 1); \
+                flag = 0;                                       \
+                break;                                          \
+            default:                                            \
+                flag = 0;                                       \
+            }                                                   \
+        }                                                       \
     }
+
+int decode(const char *s, char *dec);
 
 int main(int argc, char const **argv)
 {
@@ -151,12 +151,21 @@ int main(int argc, char const **argv)
                     VERBOSE("Route :\t%s\n", route);
 
                     /* '\0' and '.' at beginning; 13 to fit './index.html' */
-                    char routecp[(strlen(route) + 2) >= 13 ? strlen(route) + 2 : 13];
-                    memset(routecp, 0, sizeof(routecp));
-                    strncpy(routecp + 1, route, strlen(route));
-                    routecp[0] = '.';
-                    if (!strcmp(routecp, "./"))
-                        strncpy(routecp, "./index.html", 13);
+                    int sz = (strlen(route) + 2) >= 13 ? strlen(route) + 2 : 13;
+                    char routecp[sz];
+                    {
+                        char decoded_routecp[sz];
+                        memset(routecp, 0, sizeof(routecp));
+                        memset(decoded_routecp, 0, sizeof(routecp));
+                        strncpy(routecp + 1, route, strlen(route));
+                        routecp[0] = '.';
+                        if (!strcmp(routecp, "./"))
+                            strncpy(routecp, "./index.html", 13);
+
+                        decode(routecp, decoded_routecp) < 0
+                            ? memcpy(routecp, "./index.html", 13)
+                            : memcpy(routecp, decoded_routecp, sizeof(routecp));
+                    }
 
                     if (access(routecp, F_OK) == 0)
                     {
@@ -174,7 +183,7 @@ int main(int argc, char const **argv)
                                     if (dir->d_name[0] == '.' &&
                                         (dir->d_name[1] == '.' || dir->d_name[1] == '\0'))
                                         continue;
-                                    fprintf(f_send, "<a style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\""
+                                    fprintf(f_send, "<a style=\"font-family:sans-serif;padding:1em;display:inline-block;border-bottom:5px solid;\""
                                                     "href=\"/%s/%s\">%s</a>\n",
                                             routecp, dir->d_name, dir->d_name);
                                 }
@@ -200,7 +209,6 @@ int main(int argc, char const **argv)
                             fprintf(f_send, "%s", httpStatus200);
 
                             void *fileBuf = NULL;
-                            // (fileSize > BFSZ) ? fileBuf = malloc(fileSize) : (fileBuf = buf);
                             fileBuf = malloc(fileSize);
                             int n = fread(fileBuf, 1, fileSize, fp);
                             fwrite(fileBuf, 1, n, f_send);
@@ -218,6 +226,14 @@ int main(int argc, char const **argv)
                             free(fileBuf);
                             #endif
                             exit(EXIT_SUCCESS);
+                        }
+                        else
+                        {
+                            perror("fopen");
+                            fprintf(f_send, "%s"
+                                            "<h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
+                                    httpStatus403);
+                            exit(EXIT_FAILURE);
                         }
                     }
                     else
@@ -239,4 +255,33 @@ int main(int argc, char const **argv)
         close(conn_fd);
     } // main loop
     return 0;
+}
+
+inline int ishex(int x)
+{
+    return (x >= '0' && x <= '9') ||
+           (x >= 'a' && x <= 'f') ||
+           (x >= 'A' && x <= 'F');
+}
+
+int decode(const char *s, char *dec)
+{
+    char *o;
+    const char *end = s + strlen(s);
+    int c;
+
+    for (o = dec; s <= end; o++)
+    {
+        c = *s++;
+        if (c == '+')
+            c = ' ';
+        else if (c == '%' && (!ishex(*s++) ||
+                              !ishex(*s++) ||
+                              !sscanf(s - 2, "%2x", &c)))
+            return -1;
+
+        if (dec)
+            *o = c;
+    }
+    return o - dec;
 }

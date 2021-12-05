@@ -123,8 +123,8 @@ int main(int argc, char const **argv)
                 if (!poll(&fds, 1, 10 * 1000))
                     exit(EXIT_FAILURE);
 
-                valread = read(conn_fd, buf, BFSZ);
-                CHKRES(valread, "read error");
+                if (fgets(buf, BFSZ, f_recv) == NULL)
+                    exit(EXIT_FAILURE);
 
                 if (buf[0] == 'G' &&
                     buf[1] == 'E' &&

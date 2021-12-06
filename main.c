@@ -15,20 +15,7 @@
 #include <sys/resource.h>
 #endif
 
-#ifdef DEBUG
-#define VERBOSE(...) printf(__VA_ARGS__)
-#else
-#define VERBOSE(...)
-#endif
-
-#define CHKRES(res, msg)        \
-    {                           \
-        if ((res) == -1)        \
-        {                       \
-            perror(msg);        \
-            exit(EXIT_FAILURE); \
-        }                       \
-    }
+#include "helpers.h"
 
 #define PORT 8080
 #define BFSZ 1400
@@ -39,28 +26,39 @@ static char httpStatus404[] = "HTTP/1.1 404 Not Found\r\n\r\n";
 
 static char www_dir[PATH_MAX] = "./";
 
-#define SET_FLAGS(ARGC, ARGV)                                   \
-    {                                                           \
-        int flag = 0;                                           \
-        for (int i = 1; i < ARGC; ++i)                          \
-        {                                                       \
-            switch (flag)                                       \
-            {                                                   \
-            case 0:                                             \
-                if (ARGV[i][0] == '-')                          \
-                    flag = ARGV[i][1];                          \
-                break;                                          \
-            case 'd':                                           \
-                strncpy(www_dir, ARGV[i], strlen(ARGV[i]) + 1); \
-                flag = 0;                                       \
-                break;                                          \
-            default:                                            \
-                flag = 0;                                       \
-            }                                                   \
-        }                                                       \
+#define SET_FLAGS(ARGC, ARGV)                                                          \
+    {                                                                                  \
+        int flag = 0;                                                                  \
+        for (int i = 1; i < ARGC; ++i)                                                 \
+        {                                                                              \
+            switch (flag)                                                              \
+            {                                                                          \
+            case 0:                                                                    \
+                if (ARGV[i][0] == '-')                                                 \
+                    flag = ARGV[i][1];                                                 \
+                switch (flag)                                                          \
+                {                                                                      \
+                case 'd':                                                              \
+                    if (i + 1 < ARGC)                                                  \
+                        strncpy(www_dir, ARGV[i + 1], strlen(ARGV[i + 1]) + 1);        \
+                    else                                                               \
+                    {                                                                  \
+                        fprintf(stderr, NL "ERROR:" TAB "Provide path to -d flag" NL); \
+                        PRINT_HELP();                                                  \
+                        exit(EXIT_FAILURE);                                            \
+                    }                                                                  \
+                    flag = 0;                                                          \
+                    break;                                                             \
+                case 'h':                                                              \
+                    PRINT_HELP();                                                      \
+                    flag = 0;                                                          \
+                    break;                                                             \
+                }                                                                      \
+            default:                                                                   \
+                flag = 0;                                                              \
+            }                                                                          \
+        }                                                                              \
     }
-
-int decode(const char *s, char *dec);
 
 int main(int argc, char const **argv)
 {
@@ -255,33 +253,4 @@ int main(int argc, char const **argv)
         close(conn_fd);
     } // main loop
     return 0;
-}
-
-inline int ishex(int x)
-{
-    return (x >= '0' && x <= '9') ||
-           (x >= 'a' && x <= 'f') ||
-           (x >= 'A' && x <= 'F');
-}
-
-int decode(const char *s, char *dec)
-{
-    char *o;
-    const char *end = s + strlen(s);
-    int c;
-
-    for (o = dec; s <= end; o++)
-    {
-        c = *s++;
-        if (c == '+')
-            c = ' ';
-        else if (c == '%' && (!ishex(*s++) ||
-                              !ishex(*s++) ||
-                              !sscanf(s - 2, "%2x", &c)))
-            return -1;
-
-        if (dec)
-            *o = c;
-    }
-    return o - dec;
 }

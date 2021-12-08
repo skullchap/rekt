@@ -29,12 +29,65 @@
 
 #define TAB "\t"
 #define NL "\n"
-#define PRINT_HELP()                                   \
-    {                                                  \
-        fprintf(stderr,                                \
-                "FLAGS:" TAB "-d: Sets work dir" NL    \
-                    TAB "-h: Prints this message" NL); \
-        exit(EXIT_SUCCESS);                            \
+#define PRINT_HELP()                                                           \
+    {                                                                          \
+        fprintf(stderr,                                                        \
+                "FLAGS:" TAB "-d: Sets work dir" NL                            \
+                    TAB "-h: Prints this message" NL                           \
+                        TAB "-p: Sets porn number to listen on (1-65535)" NL); \
+        exit(EXIT_SUCCESS);                                                    \
+    }
+
+#define SET_FLAGS(ARGC, ARGV)                                                                    \
+    {                                                                                            \
+        int flag = 0;                                                                            \
+        for (int i = 1; i < ARGC; ++i)                                                           \
+        {                                                                                        \
+            switch (flag)                                                                        \
+            {                                                                                    \
+            case 0:                                                                              \
+                if (ARGV[i][0] == '-')                                                           \
+                    flag = ARGV[i][1];                                                           \
+                switch (flag)                                                                    \
+                {                                                                                \
+                case 'd':                                                                        \
+                    if (i + 1 < ARGC)                                                            \
+                        strncpy(www_dir, ARGV[i + 1], strlen(ARGV[i + 1]) + 1);                  \
+                    else                                                                         \
+                    {                                                                            \
+                        fprintf(stderr, NL "ERROR:" TAB "Provide path to -d flag" NL);           \
+                        PRINT_HELP();                                                            \
+                        exit(EXIT_FAILURE);                                                      \
+                    }                                                                            \
+                    flag = 0;                                                                    \
+                    break;                                                                       \
+                case 'h':                                                                        \
+                    PRINT_HELP();                                                                \
+                    flag = 0;                                                                    \
+                    break;                                                                       \
+                case 'p':                                                                        \
+                    if (i + 1 < ARGC)                                                            \
+                    {                                                                            \
+                        char *garbo = NULL;                                                      \
+                        port = strtol(argv[i + 1], &garbo, 10);                                  \
+                        (port < 1) ? (port = 0) : (port <= 65535) ? (port)                       \
+                                                                  : (port = 0);                  \
+                        if (argv[i + 1] == garbo || port == 0 || argv[i + 1][0] == '-')          \
+                        {                                                                        \
+                            fprintf(stderr, "'%s' is not a proper port number" NL, argv[i + 1]); \
+                            PRINT_HELP();                                                        \
+                        }                                                                        \
+                    }                                                                            \
+                    else                                                                         \
+                    {                                                                            \
+                        fprintf(stderr, NL "ERROR:" TAB "Provide port number (1-65535)" NL);     \
+                        PRINT_HELP();                                                            \
+                    }                                                                            \
+                }                                                                                \
+            default:                                                                             \
+                flag = 0;                                                                        \
+            }                                                                                    \
+        }                                                                                        \
     }
 
 // inline

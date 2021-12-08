@@ -20,57 +20,40 @@
 #define PORT 8080
 #define BFSZ 1400
 
+static long port = PORT;
+
 static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
 static char httpStatus403[] = "HTTP/1.1 403 Forbidden\r\n\r\n";
 static char httpStatus404[] = "HTTP/1.1 404 Not Found\r\n\r\n";
+static char httpStatus500[] = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
 
 static char www_dir[PATH_MAX] = "./";
 
-#define SET_FLAGS(ARGC, ARGV)                                                          \
-    {                                                                                  \
-        int flag = 0;                                                                  \
-        for (int i = 1; i < ARGC; ++i)                                                 \
-        {                                                                              \
-            switch (flag)                                                              \
-            {                                                                          \
-            case 0:                                                                    \
-                if (ARGV[i][0] == '-')                                                 \
-                    flag = ARGV[i][1];                                                 \
-                switch (flag)                                                          \
-                {                                                                      \
-                case 'd':                                                              \
-                    if (i + 1 < ARGC)                                                  \
-                        strncpy(www_dir, ARGV[i + 1], strlen(ARGV[i + 1]) + 1);        \
-                    else                                                               \
-                    {                                                                  \
-                        fprintf(stderr, NL "ERROR:" TAB "Provide path to -d flag" NL); \
-                        PRINT_HELP();                                                  \
-                        exit(EXIT_FAILURE);                                            \
-                    }                                                                  \
-                    flag = 0;                                                          \
-                    break;                                                             \
-                case 'h':                                                              \
-                    PRINT_HELP();                                                      \
-                    flag = 0;                                                          \
-                    break;                                                             \
-                }                                                                      \
-            default:                                                                   \
-                flag = 0;                                                              \
-            }                                                                          \
-        }                                                                              \
-    }
+#define VALSZ 128
+struct
+{
+    char content_type[VALSZ];
+    char boundary[VALSZ];
+    size_t content_length;
+} ReqHeader = {
+    .boundary = "--",
+};
+
+#define KiB (1 << 10)
+#define MiB (1 << 20)
+#define GiB (1 << 30)
 
 int main(int argc, char const **argv)
 {
     SET_FLAGS(argc, argv);
     if (!chdir(www_dir))
-        VERBOSE("\nwork dir set to %s\n\n", www_dir);
+        VERBOSE(NL"work dir set to %s"NL, www_dir);
 
     int server_fd = 0, conn_fd = 0, valread = 0;
     struct sockaddr_in address = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = INADDR_ANY,
-        .sin_port = htons(PORT),
+        .sin_port = htons(port),
     };
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -80,6 +63,7 @@ int main(int argc, char const **argv)
 
     CHKRES(bind(server_fd, (struct sockaddr *)&address, sizeof(address)), "bind error");
     CHKRES(listen(server_fd, 0), "listen error");
+    VERBOSE("listening on %ld port" NL NL, port);
 
     signal(SIGCHLD, SIG_IGN);
 
@@ -124,19 +108,32 @@ int main(int argc, char const **argv)
                 if (fgets(buf, BFSZ, f_recv) == NULL)
                     exit(EXIT_FAILURE);
 
+                char *route = NULL; /* part after METHOD (GET, POST, ...) */
+                int should_parse = 0, n = 0;
                 if (buf[0] == 'G' &&
                     buf[1] == 'E' &&
                     buf[2] == 'T')
                 {
+                    should_parse = 1, n = 3;
                     printf("%s\n", buf);
-
                     VERBOSE("Method:\tGET\n");
-                    char *route = NULL; /* part after GET */
-                    if (buf[3] == ' ')
+                }
+                else if (buf[0] == 'P' &&
+                         buf[1] == 'O' &&
+                         buf[2] == 'S' &&
+                         buf[3] == 'T')
+                {
+                    should_parse = 1, n = 4;
+                    printf("%s\n", buf);
+                    VERBOSE("Method:\tPOST\n");
+                }
+                if (should_parse)
+                {
+                    if (buf[n++] == ' ')
                     {
-                        if (buf[4] != '/')
+                        if (buf[n] != '/')
                             exit(EXIT_FAILURE);
-                        route = &buf[4];
+                        route = &buf[n];
                     }
                     else
                         exit(EXIT_FAILURE);
@@ -186,7 +183,7 @@ int main(int argc, char const **argv)
                                             routecp, dir->d_name, dir->d_name);
                                 }
                                 /* for 'CLEANER' EXIT */
-                                #ifdef EXPERIMENTAL
+                                #ifndef EXPERIMENTAL
                                 fflush(f_send);
                                 closedir(d);
                                 d = NULL;
@@ -195,6 +192,75 @@ int main(int argc, char const **argv)
                                 exit(EXIT_SUCCESS);
                             }
                         }
+
+                        // #ifdef EXPERIMENTAL
+                        if(n == 5) // POST
+                        {
+                            int offset = 0;
+                            char  * ptr = NULL;
+                            while (fgets(buf, BFSZ, f_recv) != NULL)
+                            {
+                                ptr = buf;
+                                if (offset = 14, !strncmp(buf, "Content-Type: ", offset))
+                                {
+                                    ptr = buf + offset;
+                                    int sep = strcspn(ptr, " ");
+                                    strncpy(ReqHeader.content_type, ptr, (sep < VALSZ) ? sep : VALSZ);
+                                    ;
+                                    if((ptr = strstr(ptr, "boundary"))!=NULL)
+                                    {
+                                        sep = strcspn(ptr, "=") + 1;
+                                        ptr += sep;
+                                        sep = strcspn(ptr, " ");
+                                        strncpy(ReqHeader.boundary + 2, ptr, (sep < VALSZ - 2) ? sep : VALSZ - 2);
+                                    }
+                                }
+                                if (offset = 16, !strncmp(buf, "Content-Length: ", offset))
+                                {
+                                    ptr = buf + offset;
+                                    ptr[strcspn(ptr, " ")] = '\0';
+                                    ReqHeader.content_length = strtol(ptr, NULL, 10);
+                                }
+                                if (buf[1] == '\n' || buf[1] == '\0')
+                                    break;
+                            }
+                            VERBOSE("%s\n", ReqHeader.content_type);
+                            VERBOSE("%s\n", ReqHeader.boundary);
+                            VERBOSE("%lu\n", ReqHeader.content_length);
+
+                            size_t bodyBufSize = (ReqHeader.content_length < 32 * MiB)
+                                                     ? ReqHeader.content_length
+                                                     : 32 * MiB;
+                            char* bodyBuf = NULL;
+                            if ((bodyBuf = malloc(bodyBufSize)) == NULL)
+                            {
+                                fprintf(f_send, "%s", httpStatus500);
+                                exit(EXIT_FAILURE);
+                            }
+                            int b = (ReqHeader.content_length <= bodyBufSize)
+                                        ? ReqHeader.content_length
+                                        : bodyBufSize,
+                                len = 0;
+                            VERBOSE("take %d bytes\n", b);
+
+                            while ((b = fread(bodyBuf + len, 1, b, f_recv)) > 0)
+                            {
+                                printf("b: %d\n", b);
+                                len += b;
+                                if(len > bodyBufSize)
+                                    exit(EXIT_FAILURE);
+                                b = ReqHeader.content_length - b;
+                                if (len >= ReqHeader.content_length)
+                                {
+                                    printf("%d is len\n", len);
+                                    break;
+                                }
+                            }
+
+                            printf("%s\n", bodyBuf);
+                            free(bodyBuf);
+                        }
+                        // #endif
 
                         VERBOSE("%s\n", routecp);
                         FILE *fp = fopen(routecp, "rb");
@@ -219,7 +285,7 @@ int main(int argc, char const **argv)
                                         (double)(tv2.tv_sec - tv1.tv_sec));
                             
                             /* for 'CLEANER' EXIT */
-                            #ifdef EXPERIMENTAL            
+                            #ifndef EXPERIMENTAL            
                             fclose(fp);
                             free(fileBuf);
                             #endif
@@ -245,7 +311,9 @@ int main(int argc, char const **argv)
                     }
                 }
             }
+            #ifdef DEBUG
             fwrite(buf, 1, BFSZ, f_send);
+            #endif
             exit(EXIT_SUCCESS);
         } // end child
         fclose(f_recv);

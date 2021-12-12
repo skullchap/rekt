@@ -5,11 +5,17 @@
 #include <string.h>
 #include <signal.h>
 #include <limits.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/poll.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
+
+#ifndef __APPLE__
+#include <sys/sendfile.h>
+#endif
 
 #ifdef EXPERIMENTAL
 #include <sys/resource.h>
@@ -29,6 +35,7 @@ static char httpStatus500[] = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
 
 static char www_dir[PATH_MAX] = "./";
 
+#ifdef POST
 #define VALSZ 128
 struct
 {
@@ -38,16 +45,17 @@ struct
 } ReqHeader = {
     .boundary = "--",
 };
+#endif
 
-#define KiB (1 << 10)
-#define MiB (1 << 20)
-#define GiB (1 << 30)
+#define NSPAWN 1024
+static volatile int *volatile spawn_pids;
+static volatile int *volatile taken;
 
 int main(int argc, char const **argv)
 {
     SET_FLAGS(argc, argv);
     if (!chdir(www_dir))
-        VERBOSE(NL"work dir set to %s"NL, www_dir);
+        VERBOSE(NL "work dir set to %s" NL, www_dir);
 
     int server_fd = 0, conn_fd = 0, valread = 0;
     struct sockaddr_in address = {
@@ -62,8 +70,30 @@ int main(int argc, char const **argv)
     CHKRES(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)), "setsockopt error");
 
     CHKRES(bind(server_fd, (struct sockaddr *)&address, sizeof(address)), "bind error");
-    CHKRES(listen(server_fd, 0), "listen error");
+    CHKRES(listen(server_fd, NSPAWN), "listen error");
     VERBOSE("listening on %ld port" NL NL, port);
+
+    VERBOSE("Launched workers mode\n");
+    spawn_pids = mmap(NULL, NSPAWN * sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    taken = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    *taken = -1;
+    int sv[2];
+    CHKRES(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv), "socketpair");
+
+    signal(SIGINT, siginthand);
+    sigset_t sigset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &sigset, NULL);
+    int sig = 0;
+
+    sigset_t sigset2;
+    sigemptyset(&sigset2);
+    sigaddset(&sigset2, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &sigset2, NULL);
+    int sig2 = 0;
+
+    int parent_pid = getpid();
 
     signal(SIGCHLD, SIG_IGN);
 
@@ -72,41 +102,103 @@ int main(int argc, char const **argv)
     DIR *d = NULL;
     struct dirent *dir = NULL;
 
-    struct pollfd fds;
+    struct pollfd fds = {0};
+    struct stat st = {0};
+    FILE *f_recv = NULL;
+    FILE *f_send = NULL;
 
-    while (1)
+/*
+     * ONLY WORKS WITH EXPERIMENTAL FLAG
+     * SETS STACK SIZE OF FORKED CHILD TO 12 KiB.
+     * IN CASE OF FAULTS OR BROKEN PAGES, REMOVE IT!
+    */
+#ifdef EXPERIMENTAL
+    CHKRES(setrlimit(RLIMIT_STACK,
+                     &(struct rlimit){.rlim_max = 12 * KiB,
+                                      .rlim_cur = 12 * KiB}),
+           "setrlimit error");
+#endif
+    int child = 0;
+    int pid = 0;
+    for (int i = 0; i < NSPAWN; ++i)
     {
-        conn_fd = accept(server_fd, NULL, NULL);
-        CHKRES(conn_fd, "accept error");
-
-        gettimeofday(&tv1, NULL);
-        FILE *f_recv = fdopen(conn_fd, "rb");
-        FILE *f_send = fdopen(dup(conn_fd), "wb");
-
-        fds.fd = conn_fd;
-        fds.events = POLLIN;
-
-        /*
-         * ONLY WORKS WITH EXPERIMENTAL FLAG
-         * SETS STACK SIZE OF FORKED CHILD TO 16 KiB.
-         * IN CASE OF FAULTS OR BROKEN PAGES, REMOVE IT!
-        */
-        #ifdef EXPERIMENTAL
-        CHKRES(setrlimit(RLIMIT_STACK,
-                         &(struct rlimit){.rlim_max = 16384,
-                                          .rlim_cur = 16384}),
-               "setrlimit error");
-        #endif
-
-        if (!fork()) // child
+        if (!child)
         {
-            char buf[BFSZ] = {0}; 
+            pid = fork();
+            if (pid != 0) // parent
             {
-                if (!poll(&fds, 1, 10 * 1000))
-                    exit(EXIT_FAILURE);
+                spawn_pids[i] = pid;
+                continue;
+            }
+            child = 1;
+            break;
+        }
+    }
+
+    if (!child)
+    {
+        VERBOSE("Spawned %d workers\n", NSPAWN);
+        // for (int i = 0; i < NSPAWN; ++i)
+        //     printf("%d\n", spawn_pids[i]);
+
+        close(sv[1]);
+        int sock = sv[0];
+
+        while (1)
+        {
+            conn_fd = accept(server_fd, NULL, NULL);
+            CHKRES(conn_fd, "accept error");
+
+            fds.fd = conn_fd;
+            fds.events = POLLIN;
+
+            if (!poll(&fds, 1, 10 * 1000))
+            {
+                close(conn_fd);
+                continue;
+            }
+            sendfd(sock, conn_fd);
+            *taken = 0;
+            sigwait(&sigset2, &sig2);
+            kill(*taken, SIGUSR1);
+            // kill(0, SIGUSR1);
+            close(conn_fd);
+        }
+    }
+
+    if (child)
+    {
+        close(sv[0]);
+        int sock = sv[1];
+        int fd = 0;
+        char buf[BFSZ] = {0};
+
+    child_loop:
+        while (1)
+        {
+            memset(buf, 0, BFSZ);
+            *taken = getpid();
+            kill(parent_pid, SIGUSR2);
+            sigwait(&sigset, &sig);
+            if ((*taken))
+            {
+                // *taken = getpid();
+                conn_fd = recvfd(sock);
+                gettimeofday(&tv1, NULL);
+
+                f_recv = fdopen(conn_fd, "rb");
+                f_send = fdopen(dup(conn_fd), "wb");
+
+                if (setvbuf(f_recv, buf, _IOLBF, BFSZ) < 0)
+                    perror("setvbuf error");
 
                 if (fgets(buf, BFSZ, f_recv) == NULL)
-                    exit(EXIT_FAILURE);
+                {
+                    fclose(f_recv);
+                    fclose(f_send);
+                    close(conn_fd);
+                    goto child_loop;
+                }
 
                 char *route = NULL; /* part after METHOD (GET, POST, ...) */
                 int should_parse = 0, n = 0;
@@ -115,53 +207,73 @@ int main(int argc, char const **argv)
                     buf[2] == 'T')
                 {
                     should_parse = 1, n = 3;
-                    printf("%s\n", buf);
+                    VERBOSE("Serving by %d pid\n", getpid());
+                    VERBOSE("%s\n", buf);
                     VERBOSE("Method:\tGET\n");
                 }
+#ifdef POST
                 else if (buf[0] == 'P' &&
                          buf[1] == 'O' &&
                          buf[2] == 'S' &&
                          buf[3] == 'T')
                 {
                     should_parse = 1, n = 4;
-                    printf("%s\n", buf);
+                    VERBOSE("%s\n", buf);
                     VERBOSE("Method:\tPOST\n");
                 }
+#endif
                 if (should_parse)
                 {
                     if (buf[n++] == ' ')
                     {
                         if (buf[n] != '/')
-                            exit(EXIT_FAILURE);
+                        {
+                            fclose(f_recv);
+                            fclose(f_send);
+                            close(conn_fd);
+                            goto child_loop;
+                        }
+                        buf[--n] = '.'; // adding '.' before '/' - "./"
                         route = &buf[n];
                     }
                     else
-                        exit(EXIT_FAILURE);
+                    {
+                        fclose(f_recv);
+                        fclose(f_send);
+                        close(conn_fd);
+                        goto child_loop;
+                    }
 
                     route[strcspn(route, " ")] = '\0';
 
                     if (strstr(route, "../") != NULL ||
                         strstr(route, "/..") != NULL)
-                        exit(EXIT_FAILURE); // back path-traversal prevention
+                    {
+                        fclose(f_recv);
+                        fclose(f_send);
+                        close(conn_fd);
+                        goto child_loop;
+
+                    } // back path-traversal prevention
                     VERBOSE("Route :\t%s\n", route);
 
-                    /* '\0' and '.' at beginning; 13 to fit './index.html' */
-                    int sz = (strlen(route) + 2) >= 13 ? strlen(route) + 2 : 13;
-                    char routecp[sz];
+                    char *routecp = route;
+
+                    if (!strcmp(routecp, "./"))
                     {
-                        char decoded_routecp[sz];
-                        memset(routecp, 0, sizeof(routecp));
-                        memset(decoded_routecp, 0, sizeof(routecp));
-                        strncpy(routecp + 1, route, strlen(route));
-                        routecp[0] = '.';
-                        if (!strcmp(routecp, "./"))
-                            strncpy(routecp, "./index.html", 13);
+                        routecp = "./index.html";
+                        goto skip_decode;
+                    }
+                    {
+                        int routesz = strlen(routecp) + 1;
+                        char decoded_routecp[routesz];
+                        memset(decoded_routecp, 0, sizeof(decoded_routecp));
 
                         decode(routecp, decoded_routecp) < 0
-                            ? memcpy(routecp, "./index.html", 13)
-                            : memcpy(routecp, decoded_routecp, sizeof(routecp));
+                            ? routecp = "./index.html"
+                            : memcpy(routecp, decoded_routecp, routesz);
                     }
-
+                skip_decode:
                     if (access(routecp, F_OK) == 0)
                     {
                         stat(routecp, &stats);
@@ -170,34 +282,31 @@ int main(int argc, char const **argv)
                             d = opendir(routecp);
                             if (d)
                             {
-                                fprintf(f_send, "%s", httpStatus200);
-                                fprintf(f_send, "<!DOCTYPE html><h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
+                                dprintf(conn_fd, "%s", httpStatus200);
+                                dprintf(conn_fd, "<!DOCTYPE html><h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
 
                                 while ((dir = readdir(d)) != NULL)
                                 {
                                     if (dir->d_name[0] == '.' &&
                                         (dir->d_name[1] == '.' || dir->d_name[1] == '\0'))
                                         continue;
-                                    fprintf(f_send, "<a style=\"font-family:sans-serif;padding:1em;display:inline-block;border-bottom:5px solid;\""
-                                                    "href=\"/%s/%s\">%s</a>\n",
+                                    dprintf(conn_fd, "<a style=\"font-family:sans-serif;padding:1em;display:inline-block;border-bottom:5px solid;\""
+                                                     "href=\"/%s/%s\">%s</a>\n",
                                             routecp, dir->d_name, dir->d_name);
                                 }
-                                /* for 'CLEANER' EXIT */
-                                #ifndef EXPERIMENTAL
-                                fflush(f_send);
                                 closedir(d);
-                                d = NULL;
-                                dir = NULL;
-                                #endif
-                                exit(EXIT_SUCCESS);
+                                fclose(f_recv);
+                                fclose(f_send);
+                                close(conn_fd);
+                                goto child_loop;
                             }
                         }
 
-                        // #ifdef EXPERIMENTAL
-                        if(n == 5) // POST
+#ifdef POST
+                        if (n == 4) // POST
                         {
                             int offset = 0;
-                            char  * ptr = NULL;
+                            char *ptr = NULL;
                             while (fgets(buf, BFSZ, f_recv) != NULL)
                             {
                                 ptr = buf;
@@ -207,7 +316,7 @@ int main(int argc, char const **argv)
                                     int sep = strcspn(ptr, " ");
                                     strncpy(ReqHeader.content_type, ptr, (sep < VALSZ) ? sep : VALSZ);
                                     ;
-                                    if((ptr = strstr(ptr, "boundary"))!=NULL)
+                                    if ((ptr = strstr(ptr, "boundary")) != NULL)
                                     {
                                         sep = strcspn(ptr, "=") + 1;
                                         ptr += sep;
@@ -231,11 +340,14 @@ int main(int argc, char const **argv)
                             size_t bodyBufSize = (ReqHeader.content_length < 32 * MiB)
                                                      ? ReqHeader.content_length
                                                      : 32 * MiB;
-                            char* bodyBuf = NULL;
+                            char *bodyBuf = NULL;
                             if ((bodyBuf = malloc(bodyBufSize)) == NULL)
                             {
                                 fprintf(f_send, "%s", httpStatus500);
-                                exit(EXIT_FAILURE);
+                                fclose(f_recv);
+                                fclose(f_send);
+                                close(conn_fd);
+                                goto child_loop;
                             }
                             int b = (ReqHeader.content_length <= bodyBufSize)
                                         ? ReqHeader.content_length
@@ -247,8 +359,14 @@ int main(int argc, char const **argv)
                             {
                                 printf("b: %d\n", b);
                                 len += b;
-                                if(len > bodyBufSize)
-                                    exit(EXIT_FAILURE);
+                                if (len > bodyBufSize)
+                                {
+                                    free(bodyBuf);
+                                    fclose(f_recv);
+                                    fclose(f_send);
+                                    close(conn_fd);
+                                    goto child_loop;
+                                }
                                 b = ReqHeader.content_length - b;
                                 if (len >= ReqHeader.content_length)
                                 {
@@ -260,65 +378,69 @@ int main(int argc, char const **argv)
                             printf("%s\n", bodyBuf);
                             free(bodyBuf);
                         }
-                        // #endif
+#endif
 
                         VERBOSE("%s\n", routecp);
-                        FILE *fp = fopen(routecp, "rb");
-                        if (fp != NULL)
+                        int fd = open(routecp, O_RDONLY);
+                        if (fd > 0)
                         {
-                            fseek(fp, 0, SEEK_END);
-                            size_t fileSize = ftell(fp);
-                            rewind(fp);
+                            fstat(fd, &st);
+                            off_t fileSize = st.st_size;
 
-                            fprintf(f_send, "%s", httpStatus200);
+                            dprintf(conn_fd, "%s", httpStatus200);
+#ifdef __APPLE__
+                            CHKRES(sendfile(fd, conn_fd, 0, &fileSize, NULL, 0), "sendfile error");
+#else
+                            CHKRES(sendfile(conn_fd, fd, NULL, fileSize), "sendfile error");
+#endif
 
-                            void *fileBuf = NULL;
-                            fileBuf = malloc(fileSize);
-                            int n = fread(fileBuf, 1, fileSize, fp);
-                            fwrite(fileBuf, 1, n, f_send);
-                            fflush(f_send);
                             gettimeofday(&tv2, NULL);
 
-                            VERBOSE("Size :\t%zu KiB\n", fileSize / (1 << 10));
+                            VERBOSE("Size :\t%lld KiB\n", fileSize / (1 << 10));
                             VERBOSE("Handle time = %f seconds\n\n",
                                     (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
                                         (double)(tv2.tv_sec - tv1.tv_sec));
-                            
-                            /* for 'CLEANER' EXIT */
-                            #ifndef EXPERIMENTAL            
-                            fclose(fp);
-                            free(fileBuf);
-                            #endif
-                            exit(EXIT_SUCCESS);
+
+                            close(fd);
+                            fclose(f_recv);
+                            fclose(f_send);
+                            close(conn_fd);
+                            goto child_loop;
                         }
                         else
                         {
-                            perror("fopen");
-                            fprintf(f_send, "%s"
-                                            "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
+                            perror("open error");
+                            dprintf(conn_fd, "%s"
+                                             "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
                                     httpStatus403);
-                            exit(EXIT_FAILURE);
+                            fclose(f_recv);
+                            fclose(f_send);
+                            close(conn_fd);
+                            goto child_loop;
                         }
                     }
                     else
                     {
                         VERBOSE("%s does not exist\n\n", routecp);
-                        fprintf(f_send, "%s"
-                                        "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
+                        dprintf(conn_fd, "%s"
+                                         "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
                                 httpStatus404,
                                 routecp);
-                        exit(EXIT_SUCCESS);
+                        fclose(f_recv);
+                        fclose(f_send);
+                        close(conn_fd);
+                        goto child_loop;
                     }
                 }
-            }
-            #ifdef DEBUG
-            fwrite(buf, 1, BFSZ, f_send);
-            #endif
-            exit(EXIT_SUCCESS);
-        } // end child
-        fclose(f_recv);
-        fclose(f_send);
-        close(conn_fd);
-    } // main loop
+
+#ifdef DEBUG
+                fwrite(buf, 1, BFSZ, f_send);
+#endif
+                fclose(f_recv);
+                fclose(f_send);
+                close(conn_fd);
+            } // end if taken
+        }     // main loop
+    }         // end if child
     return 0;
 }

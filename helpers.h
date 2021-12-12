@@ -17,6 +17,9 @@
 #define VERBOSE(...)
 #endif
 
+#define KiB (1 << 10)
+#define MiB (1 << 20)
+
 #define CHKRES(res, msg)                                     \
     {                                                        \
         if ((res) == -1)                                     \

@@ -47,7 +47,7 @@ struct
 };
 #endif
 
-#define NSPAWN 1024
+#define NSPAWN 16
 static volatile int *volatile spawn_pids;
 static volatile int *volatile taken;
 
@@ -70,7 +70,7 @@ int main(int argc, char const **argv)
     CHKRES(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)), "setsockopt error");
 
     CHKRES(bind(server_fd, (struct sockaddr *)&address, sizeof(address)), "bind error");
-    CHKRES(listen(server_fd, NSPAWN), "listen error");
+    CHKRES(listen(server_fd, 0), "listen error");
     VERBOSE("listening on %ld port" NL NL, port);
 
     VERBOSE("Launched workers mode\n");
@@ -396,7 +396,7 @@ int main(int argc, char const **argv)
 
                             gettimeofday(&tv2, NULL);
 
-                            VERBOSE("Size :\t%lld KiB\n", fileSize / (1 << 10));
+                            VERBOSE("Size :\t%ld KiB\n", fileSize / (1 << 10));
                             VERBOSE("Handle time = %f seconds\n\n",
                                     (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
                                         (double)(tv2.tv_sec - tv1.tv_sec));

@@ -149,14 +149,6 @@ int main(int argc, char const **argv)
             conn_fd = accept(server_fd, NULL, NULL);
             CHKRES(conn_fd, "accept error");
 
-            fds.fd = conn_fd;
-            fds.events = POLLIN;
-
-            if (!poll(&fds, 1, 10 * 1000))
-            {
-                close(conn_fd);
-                continue;
-            }
             sendfd(sock, conn_fd);
             *taken = 0;
             sigwait(&sigset2, &sig2);
@@ -185,6 +177,15 @@ int main(int argc, char const **argv)
                 // *taken = getpid();
                 conn_fd = recvfd(sock);
                 gettimeofday(&tv1, NULL);
+
+                fds.fd = conn_fd;
+                fds.events = POLLIN;
+
+                if (!poll(&fds, 1, 10 * 1000))
+                {
+                    close(conn_fd);
+                    continue;
+                }
 
                 f_recv = fdopen(conn_fd, "rb");
                 f_send = fdopen(dup(conn_fd), "wb");
@@ -396,7 +397,7 @@ int main(int argc, char const **argv)
 
                             gettimeofday(&tv2, NULL);
 
-                            VERBOSE("Size :\t%ld KiB\n", fileSize / (1 << 10));
+                            VERBOSE("Size :\t%lld KiB\n", fileSize / (1 << 10));
                             VERBOSE("Handle time = %f seconds\n\n",
                                     (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
                                         (double)(tv2.tv_sec - tv1.tv_sec));

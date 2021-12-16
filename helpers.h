@@ -32,13 +32,16 @@
 #define GiB (1 << 30)
 #define TAB "\t"
 #define NL "\n"
-#define PRINT_HELP()                                                           \
-    {                                                                          \
-        fprintf(stderr,                                                        \
-                "FLAGS:" TAB "-d: Sets work dir" NL                            \
-                    TAB "-h: Prints this message" NL                           \
-                        TAB "-p: Sets porn number to listen on (1-65535)" NL); \
-        exit(EXIT_SUCCESS);                                                    \
+#define PRINT_HELP()                                                         \
+    {                                                                        \
+        fprintf(stderr,                                                      \
+                "FLAGS:" TAB "-d: Sets work dir" NL                          \
+                    TAB "-h: Prints this message" NL                         \
+                        TAB "-p: Sets porn number to listen on (1-65535)" NL \
+                            TAB "-s: Enables SSL mode" NL                    \
+                                TAB TAB "-c: Sets SSL PEM cert file" NL      \
+                                    TAB TAB "-k: Sets SSL PEM key file" NL); \
+        exit(EXIT_SUCCESS);                                                  \
     }
 
 #define SET_FLAGS(ARGC, ARGV)                                                                    \
@@ -72,12 +75,12 @@
                     if (i + 1 < ARGC)                                                            \
                     {                                                                            \
                         char *garbo = NULL;                                                      \
-                        port = strtol(argv[i + 1], &garbo, 10);                                  \
+                        port = strtol(ARGV[i + 1], &garbo, 10);                                  \
                         (port < 1) ? (port = 0) : (port <= 65535) ? (port)                       \
                                                                   : (port = 0);                  \
-                        if (argv[i + 1] == garbo || port == 0 || argv[i + 1][0] == '-')          \
+                        if (ARGV[i + 1] == garbo || port == 0 || ARGV[i + 1][0] == '-')          \
                         {                                                                        \
-                            fprintf(stderr, "'%s' is not a proper port number" NL, argv[i + 1]); \
+                            fprintf(stderr, "'%s' is not a proper port number" NL, ARGV[i + 1]); \
                             PRINT_HELP();                                                        \
                         }                                                                        \
                     }                                                                            \
@@ -86,9 +89,44 @@
                         fprintf(stderr, NL "ERROR:" TAB "Provide port number (1-65535)" NL);     \
                         PRINT_HELP();                                                            \
                     }                                                                            \
+                case 's':                                                                        \
+                    ssl_flag++;                                                                  \
+                    flag = 0;                                                                    \
+                    break;                                                                       \
+                case 'c':                                                                        \
+                    if (i + 1 < ARGC && (access(ARGV[i + 1], F_OK)) == 0)                        \
+                        pem_cert_file = ARGV[i + 1];                                             \
+                    else                                                                         \
+                    {                                                                            \
+                        fprintf(stderr, NL "ERROR:" TAB "Provide path to PEM cert file" NL);     \
+                        PRINT_HELP();                                                            \
+                        exit(EXIT_FAILURE);                                                      \
+                    }                                                                            \
+                    flag = 0;                                                                    \
+                    break;                                                                       \
+                case 'k':                                                                        \
+                    if (i + 1 < ARGC && (access(ARGV[i + 1], F_OK)) == 0)                        \
+                        pem_key_file = ARGV[i + 1];                                              \
+                    else                                                                         \
+                    {                                                                            \
+                        fprintf(stderr, NL "ERROR:" TAB "Provide path to PEM key file" NL);      \
+                        PRINT_HELP();                                                            \
+                        exit(EXIT_FAILURE);                                                      \
+                    }                                                                            \
+                    flag = 0;                                                                    \
+                    break;                                                                       \
                 }                                                                                \
             default:                                                                             \
                 flag = 0;                                                                        \
+            }                                                                                    \
+        }                                                                                        \
+        if (ssl_flag)                                                                            \
+        {                                                                                        \
+            if (pem_cert_file == NULL || pem_key_file == NULL)                                   \
+            {                                                                                    \
+                fprintf(stderr, NL "ERROR:" TAB "Provide path to PEM files" NL);                 \
+                PRINT_HELP();                                                                    \
+                exit(EXIT_FAILURE);                                                              \
             }                                                                                    \
         }                                                                                        \
     }

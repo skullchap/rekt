@@ -13,6 +13,14 @@
 #include <sys/mman.h>
 #include <netinet/in.h>
 
+#if __has_include(<openssl/ssl.h>)
+#define REKTSSL 1
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#else
+#warning NO OPENSSL LIBRARY HEADER DETECTED, COMPILING WITHOUT SSL SUPPORT
+#endif
+
 #ifndef __APPLE__
 #include <sys/sendfile.h>
 #endif
@@ -27,6 +35,9 @@
 #define BFSZ 1400
 
 static long port = PORT;
+static int ssl_flag = 0;
+char *pem_cert_file = NULL;
+char *pem_key_file = NULL;
 
 static char httpStatus200[] = "HTTP/1.1 200 OK\r\n\r\n";
 static char httpStatus403[] = "HTTP/1.1 403 Forbidden\r\n\r\n";
@@ -48,12 +59,48 @@ struct
 #endif
 
 #define NSPAWN 16
-static volatile int *volatile spawn_pids;
-static volatile int *volatile taken;
+static volatile int *volatile spawn_pids = NULL;
+static volatile int *volatile taken = NULL;
 
-int main(int argc, char const **argv)
+int main(int argc, char **argv)
 {
     SET_FLAGS(argc, argv);
+
+#ifdef REKTSSL
+    SSL *ssl = NULL;
+    SSL_CTX *ctx = NULL;
+    if (ssl_flag)
+    {
+        const SSL_METHOD *method;
+
+        method = TLS_server_method();
+
+        ctx = SSL_CTX_new(method);
+        if (!ctx)
+        {
+            perror("Unable to create SSL context");
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
+
+        /* Set the key and cert */
+        if (SSL_CTX_use_certificate_file(ctx, pem_cert_file, SSL_FILETYPE_PEM) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
+
+        if (SSL_CTX_use_PrivateKey_file(ctx, pem_key_file, SSL_FILETYPE_PEM) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
+        VERBOSE("SSL Enabled\n");
+    }
+
+#endif
+
+    // int nproc = sysconf(_SC_NPROCESSORS_ONLN);
     if (!chdir(www_dir))
         VERBOSE(NL "work dir set to %s" NL, www_dir);
 
@@ -104,18 +151,16 @@ int main(int argc, char const **argv)
 
     struct pollfd fds = {0};
     struct stat st = {0};
-    FILE *f_recv = NULL;
-    FILE *f_send = NULL;
 
 /*
      * ONLY WORKS WITH EXPERIMENTAL FLAG
-     * SETS STACK SIZE OF FORKED CHILD TO 12 KiB.
+     * SETS STACK SIZE OF FORKED CHILD TO 8 KiB.
      * IN CASE OF FAULTS OR BROKEN PAGES, REMOVE IT!
     */
 #ifdef EXPERIMENTAL
     CHKRES(setrlimit(RLIMIT_STACK,
-                     &(struct rlimit){.rlim_max = 12 * KiB,
-                                      .rlim_cur = 12 * KiB}),
+                     &(struct rlimit){.rlim_max = 8 * KiB,
+                                      .rlim_cur = 8 * KiB}),
            "setrlimit error");
 #endif
     int child = 0;
@@ -184,22 +229,25 @@ int main(int argc, char const **argv)
                 if (!poll(&fds, 1, 10 * 1000))
                 {
                     close(conn_fd);
-                    continue;
-                }
-
-                f_recv = fdopen(conn_fd, "rb");
-                f_send = fdopen(dup(conn_fd), "wb");
-
-                if (setvbuf(f_recv, buf, _IOLBF, BFSZ) < 0)
-                    perror("setvbuf error");
-
-                if (fgets(buf, BFSZ, f_recv) == NULL)
-                {
-                    fclose(f_recv);
-                    fclose(f_send);
-                    close(conn_fd);
                     goto child_loop;
                 }
+
+#ifdef REKTSSL
+                if (ssl_flag)
+                {
+                    ssl = SSL_new(ctx);
+
+                    SSL_set_fd(ssl, conn_fd);
+                    if (SSL_accept(ssl) <= 0)
+                    {
+                        ERR_print_errors_fp(stderr);
+                        goto cleanup;
+                    }
+                    SSL_read(ssl, buf, BFSZ);
+                }
+                else
+#endif
+                    read(conn_fd, buf, BFSZ);
 
                 char *route = NULL; /* part after METHOD (GET, POST, ...) */
                 int should_parse = 0, n = 0;
@@ -228,34 +276,20 @@ int main(int argc, char const **argv)
                     if (buf[n++] == ' ')
                     {
                         if (buf[n] != '/')
-                        {
-                            fclose(f_recv);
-                            fclose(f_send);
-                            close(conn_fd);
-                            goto child_loop;
-                        }
+                            goto cleanup;
+
                         buf[--n] = '.'; // adding '.' before '/' - "./"
                         route = &buf[n];
                     }
                     else
-                    {
-                        fclose(f_recv);
-                        fclose(f_send);
-                        close(conn_fd);
-                        goto child_loop;
-                    }
+                        goto cleanup;
 
                     route[strcspn(route, " ")] = '\0';
 
                     if (strstr(route, "../") != NULL ||
                         strstr(route, "/..") != NULL)
-                    {
-                        fclose(f_recv);
-                        fclose(f_send);
-                        close(conn_fd);
-                        goto child_loop;
+                        goto cleanup; // back path-traversal prevention
 
-                    } // back path-traversal prevention
                     VERBOSE("Route :\t%s\n", route);
 
                     char *routecp = route;
@@ -283,23 +317,39 @@ int main(int argc, char const **argv)
                             d = opendir(routecp);
                             if (d)
                             {
-                                dprintf(conn_fd, "%s", httpStatus200);
-                                dprintf(conn_fd, "<!DOCTYPE html><h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
+                                routecp = strdup(routecp);
+                                memset(buf, 0, BFSZ);
+                                snprintf(buf, BFSZ, "%s", httpStatus200);
+                                int slen = strlen(buf);
+                                snprintf(buf + slen, BFSZ - slen, "<!DOCTYPE html><h1 style=\"font-family:sans-serif;padding:1em;border-bottom:5px solid;\">%s</h1>\r\n", routecp);
+#ifdef REKTSSL
+                                if (ssl_flag)
+                                    SSL_write(ssl, buf, strlen(buf));
+                                else
+#endif
+                                    write(conn_fd, buf, strlen(buf));
 
                                 while ((dir = readdir(d)) != NULL)
                                 {
+                                    memset(buf, 0, BFSZ);
+
                                     if (dir->d_name[0] == '.' &&
                                         (dir->d_name[1] == '.' || dir->d_name[1] == '\0'))
                                         continue;
-                                    dprintf(conn_fd, "<a style=\"font-family:sans-serif;padding:1em;display:inline-block;border-bottom:5px solid;\""
-                                                     "href=\"/%s/%s\">%s</a>\n",
-                                            routecp, dir->d_name, dir->d_name);
+                                    snprintf(buf, BFSZ, "<a style=\"font-family:sans-serif;padding:1em;display:inline-block;border-bottom:5px solid;\""
+                                                        "href=\"/%s/%s\">%s</a>\n",
+                                             routecp, dir->d_name, dir->d_name);
+#ifdef REKTSSL
+                                    if (ssl_flag)
+                                        SSL_write(ssl, buf, strlen(buf));
+                                    else
+#endif
+                                        write(conn_fd, buf, strlen(buf));
                                 }
+                                free(routecp);
                                 closedir(d);
-                                fclose(f_recv);
-                                fclose(f_send);
-                                close(conn_fd);
-                                goto child_loop;
+
+                                goto cleanup;
                             }
                         }
 
@@ -386,59 +436,97 @@ int main(int argc, char const **argv)
                         if (fd > 0)
                         {
                             fstat(fd, &st);
-                            off_t fileSize = st.st_size;
+                            ssize_t fileSize = (ssize_t)st.st_size;
+#ifdef REKTSSL
+                            if (ssl_flag)
+                            {
+                                memset(buf, 0, BFSZ);
+                                snprintf(buf, BFSZ, "%s", httpStatus200);
+                                SSL_write(ssl, buf, strlen(buf));
 
-                            dprintf(conn_fd, "%s", httpStatus200);
-#ifdef __APPLE__
-                            CHKRES(sendfile(fd, conn_fd, 0, &fileSize, NULL, 0), "sendfile error");
-#else
-                            CHKRES(sendfile(conn_fd, fd, NULL, fileSize), "sendfile error");
+                                void *fileBuf = malloc(fileSize);
+                                read(fd, fileBuf, fileSize);
+                                SSL_write(ssl, fileBuf, fileSize);
+                                free(fileBuf);
+                            }
+                            else
 #endif
+                            {
+                                dprintf(conn_fd, "%s", httpStatus200);
+#ifdef __APPLE__
+                                CHKRES(sendfile(fd, conn_fd, 0, &fileSize, NULL, 0), "sendfile error");
+#else
+                                CHKRES(sendfile(conn_fd, fd, NULL, fileSize), "sendfile error");
+#endif
+                            }
 
                             gettimeofday(&tv2, NULL);
 
-                            VERBOSE("Size :\t%lld KiB\n", fileSize / (1 << 10));
+                            VERBOSE("Size :\t%zu KiB\n", fileSize / (1 << 10));
                             VERBOSE("Handle time = %f seconds\n\n",
                                     (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
                                         (double)(tv2.tv_sec - tv1.tv_sec));
 
                             close(fd);
-                            fclose(f_recv);
-                            fclose(f_send);
-                            close(conn_fd);
-                            goto child_loop;
+                            goto cleanup;
                         }
                         else
                         {
                             perror("open error");
-                            dprintf(conn_fd, "%s"
-                                             "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
-                                    httpStatus403);
-                            fclose(f_recv);
-                            fclose(f_send);
-                            close(conn_fd);
-                            goto child_loop;
+#ifdef REKTSSL
+                            if (ssl_flag)
+                            {
+                                memset(buf, 0, BFSZ);
+                                snprintf(buf, BFSZ, "%s"
+                                                    "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
+                                         httpStatus403);
+                                SSL_write(ssl, buf, strlen(buf));
+                            }
+                            else
+#endif
+                                dprintf(conn_fd, "%s"
+                                                 "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">Access denied</h2>\r\n",
+                                        httpStatus403);
+
+                            goto cleanup;
                         }
                     }
                     else
                     {
                         VERBOSE("%s does not exist\n\n", routecp);
-                        dprintf(conn_fd, "%s"
-                                         "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
-                                httpStatus404,
-                                routecp);
-                        fclose(f_recv);
-                        fclose(f_send);
+#ifdef REKTSSL
+                        if (ssl_flag)
+                        {
+                            memset(buf, 0, BFSZ);
+                            snprintf(buf, BFSZ, "%s"
+                                                "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
+                                     httpStatus404,
+                                     routecp);
+                            SSL_write(ssl, buf, strlen(buf));
+                        }
+                        else
+#endif
+                            dprintf(conn_fd, "%s"
+                                             "<!DOCTYPE html><h2 style=\"font-family:sans-serif;\">%s does not exist</h2>\r\n",
+                                    httpStatus404,
+                                    routecp);
+
+                    cleanup:
+#ifdef REKTSSL
+                        if (ssl_flag)
+                        {
+                            SSL_shutdown(ssl);
+                            SSL_free(ssl);
+                        }
+#endif
                         close(conn_fd);
                         goto child_loop;
                     }
                 }
 
 #ifdef DEBUG
-                fwrite(buf, 1, BFSZ, f_send);
+                write(conn_fd, buf, BFSZ);
 #endif
-                fclose(f_recv);
-                fclose(f_send);
                 close(conn_fd);
             } // end if taken
         }     // main loop

@@ -1,5 +1,5 @@
 # rekt
-server that rekts
+fork() based file server
 
 ```cc main.c -O3 -D DEBUG``` to compile with Verbose Output
 
